@@ -1,6 +1,6 @@
 module github.com/qiniu/goc
 
-go 1.22
+go 1.20
 
 require (
 	github.com/gin-gonic/gin v1.7.7
