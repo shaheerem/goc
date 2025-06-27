@@ -88,7 +88,6 @@ func (s *server) Route(w io.Writer) *gin.Engine {
 	v1 := r.Group("/v1")
 	{
 		v1.POST("/cover/register", s.registerService)
-		v1.GET("/cover/profile", s.profile)
 		v1.GET("/cover/profile/", s.profileByServiceName)
 		v1.POST("/cover/profile", s.profile)
 		v1.POST("/cover/clear", s.clear)
