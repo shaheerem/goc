@@ -19,8 +19,8 @@ package cover
 import (
 	"bytes"
 	"fmt"
+	"html/template"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -89,6 +89,7 @@ func (s *server) Route(w io.Writer) *gin.Engine {
 	{
 		v1.POST("/cover/register", s.registerService)
 		v1.GET("/cover/profile/", s.profileByServiceName)
+		v1.GET("/cover/profile", s.profile)
 		v1.POST("/cover/profile", s.profile)
 		v1.POST("/cover/clear", s.clear)
 		v1.POST("/cover/init", s.initSystem)
@@ -261,8 +262,9 @@ func (s *server) profile(c *gin.Context) {
 	}
 }
 
-// profileByServiceName API example:
-// GET /v1/cover/profile/?name=relay-agent
+// profileByServiceName API examples:
+// GET /v1/cover/profile/?name=relay-agent (returns raw coverage profile)
+// GET /v1/cover/profile/?name=relay-agent&format=html (returns HTML coverage report)
 func (s *server) profileByServiceName(c *gin.Context) {
 	serviceName := c.Query("name")
 	if serviceName == "" {
@@ -312,10 +314,174 @@ func (s *server) profileByServiceName(c *gin.Context) {
 		return
 	}
 
+	// Check if HTML format is requested
+	format := c.Query("format")
+	if format == "html" {
+		htmlOutput, err := convertCoverageToHTML(merged)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to convert coverage to HTML: %v", err)})
+			return
+		}
+		c.Header("Content-Type", "text/html")
+		c.String(http.StatusOK, string(htmlOutput))
+		return
+	}
+
 	if err := cov.DumpProfile(merged, c.Writer); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+}
+
+// convertCoverageToHTML converts coverage profile to HTML using embedded HTML generation
+func convertCoverageToHTML(profiles []*cover.Profile) ([]byte, error) {
+	var buf bytes.Buffer
+
+	// Generate HTML coverage report
+	if err := generateHTMLCoverageReport(profiles, &buf); err != nil {
+		return nil, fmt.Errorf("failed to generate HTML coverage report: %v", err)
+	}
+
+	return buf.Bytes(), nil
+}
+
+// generateHTMLCoverageReport generates an HTML coverage report from coverage profiles
+func generateHTMLCoverageReport(profiles []*cover.Profile, w io.Writer) error {
+	tmpl := `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Coverage Report</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        h1 { color: #333; }
+        .summary { background: #f5f5f5; padding: 15px; margin: 20px 0; border-radius: 5px; }
+        .file { margin: 20px 0; border: 1px solid #ddd; border-radius: 5px; }
+        .file-header { background: #f9f9f9; padding: 10px; font-weight: bold; border-bottom: 1px solid #ddd; }
+        .coverage-high { background-color: #d4edda; }
+        .coverage-medium { background-color: #fff3cd; }
+        .coverage-low { background-color: #f8d7da; }
+        .coverage-none { background-color: #f5f5f5; }
+        .block { margin: 5px 0; padding: 5px; border-radius: 3px; }
+        .covered { background-color: #c3e6cb; }
+        .not-covered { background-color: #f5c6cb; }
+        table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+        th, td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #f2f2f2; }
+        .percent { text-align: right; }
+    </style>
+</head>
+<body>
+    <h1>Coverage Report</h1>
+    
+    <div class="summary">
+        <h2>Summary</h2>
+        <table>
+            <tr><th>File</th><th>Coverage</th><th>Lines</th><th>Covered</th></tr>
+            {{range .Files}}
+            <tr>
+                <td>{{.Name}}</td>
+                <td class="percent">{{printf "%.1f%%" .Coverage}}</td>
+                <td class="percent">{{.TotalLines}}</td>
+                <td class="percent">{{.CoveredLines}}</td>
+            </tr>
+            {{end}}
+        </table>
+        <p><strong>Total Coverage: {{printf "%.1f%%" .TotalCoverage}}</strong></p>
+    </div>
+
+    {{range .Files}}
+    <div class="file">
+        <div class="file-header">{{.Name}} ({{printf "%.1f%%" .Coverage}})</div>
+        {{range .Blocks}}
+        <div class="block {{if .Covered}}covered{{else}}not-covered{{end}}">
+            Lines {{.StartLine}}-{{.EndLine}}: {{if .Covered}}✓ Covered ({{.Count}} times){{else}}✗ Not covered{{end}}
+        </div>
+        {{end}}
+    </div>
+    {{end}}
+</body>
+</html>`
+
+	// Calculate coverage statistics
+	data := calculateCoverageStats(profiles)
+
+	// Parse and execute template
+	t, err := template.New("coverage").Parse(tmpl)
+	if err != nil {
+		return fmt.Errorf("failed to parse template: %v", err)
+	}
+
+	return t.Execute(w, data)
+}
+
+// CoverageData represents the data structure for the HTML template
+type CoverageData struct {
+	TotalCoverage float64
+	Files         []FileData
+}
+
+type FileData struct {
+	Name         string
+	Coverage     float64
+	TotalLines   int
+	CoveredLines int
+	Blocks       []BlockData
+}
+
+type BlockData struct {
+	StartLine int
+	EndLine   int
+	Covered   bool
+	Count     int
+}
+
+// calculateCoverageStats calculates coverage statistics from profiles
+func calculateCoverageStats(profiles []*cover.Profile) CoverageData {
+	var data CoverageData
+	var totalStatements, coveredStatements int64
+
+	for _, profile := range profiles {
+		fileData := FileData{
+			Name:   profile.FileName,
+			Blocks: make([]BlockData, 0),
+		}
+
+		var fileStatements, fileCovered int64
+
+		for _, block := range profile.Blocks {
+			blockData := BlockData{
+				StartLine: block.StartLine,
+				EndLine:   block.EndLine,
+				Covered:   block.Count > 0,
+				Count:     block.Count,
+			}
+			fileData.Blocks = append(fileData.Blocks, blockData)
+
+			statements := int64(block.NumStmt)
+			fileStatements += statements
+			totalStatements += statements
+
+			if block.Count > 0 {
+				fileCovered += statements
+				coveredStatements += statements
+			}
+		}
+
+		fileData.TotalLines = int(fileStatements)
+		fileData.CoveredLines = int(fileCovered)
+		if fileStatements > 0 {
+			fileData.Coverage = float64(fileCovered) / float64(fileStatements) * 100
+		}
+
+		data.Files = append(data.Files, fileData)
+	}
+
+	if totalStatements > 0 {
+		data.TotalCoverage = float64(coveredStatements) / float64(totalStatements) * 100
+	}
+
+	return data
 }
 
 // filterProfile filters profiles of the packages matching the coverFile pattern
@@ -420,7 +586,7 @@ func convertProfile(p []byte) ([]*cover.Profile, error) {
 	// Annoyingly, ParseProfiles only accepts a filename, so we have to write the bytes to disk
 	// so it can read them back.
 	// We could probably also just give it /dev/stdin, but that'll break on Windows.
-	tf, err := ioutil.TempFile("", "")
+	tf, err := os.CreateTemp("", "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp file, err: %v", err)
 	}

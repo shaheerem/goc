@@ -683,3 +683,114 @@ func TestProfileByServiceNameSuccess(t *testing.T) {
 	// In a real scenario, you'd want to set up httptest servers
 	// to mock the worker.Profile() calls
 }
+
+func TestConvertCoverageToHTML(t *testing.T) {
+	// Create sample coverage profiles for testing
+	profiles := []*cover.Profile{
+		{
+			FileName: "test.go",
+			Mode:     "count",
+			Blocks: []cover.ProfileBlock{
+				{StartLine: 1, StartCol: 1, EndLine: 5, EndCol: 10, NumStmt: 3, Count: 5},
+				{StartLine: 6, StartCol: 1, EndLine: 10, EndCol: 10, NumStmt: 2, Count: 0},
+			},
+		},
+		{
+			FileName: "main.go",
+			Mode:     "count",
+			Blocks: []cover.ProfileBlock{
+				{StartLine: 1, StartCol: 1, EndLine: 3, EndCol: 10, NumStmt: 2, Count: 10},
+			},
+		},
+	}
+
+	htmlOutput, err := convertCoverageToHTML(profiles)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, htmlOutput)
+
+	// Check that the HTML contains expected elements
+	htmlString := string(htmlOutput)
+	assert.Contains(t, htmlString, "<!DOCTYPE html>")
+	assert.Contains(t, htmlString, "Coverage Report")
+	assert.Contains(t, htmlString, "test.go")
+	assert.Contains(t, htmlString, "main.go")
+	assert.Contains(t, htmlString, "Total Coverage:")
+
+	// Check for CSS styles
+	assert.Contains(t, htmlString, "covered")
+	assert.Contains(t, htmlString, "not-covered")
+}
+
+func TestProfileByServiceNameHTMLFormat(t *testing.T) {
+	testObj := new(MockStore)
+	server := &server{
+		Store: testObj,
+	}
+	router := server.Route(os.Stdout)
+
+	tests := []struct {
+		name           string
+		queryParam     string
+		format         string
+		mockServices   map[string][]string
+		expectedStatus int
+		expectedError  string
+	}{
+		{
+			name:           "html format with missing service name",
+			queryParam:     "",
+			format:         "html",
+			expectedStatus: http.StatusBadRequest,
+			expectedError:  "service name is required",
+		},
+		{
+			name:           "html format with non-existent service",
+			queryParam:     "unknown-service",
+			format:         "html",
+			mockServices:   map[string][]string{"other-service": {"http://127.0.0.1:8080"}},
+			expectedStatus: http.StatusNotFound,
+			expectedError:  "service [unknown-service] not found",
+		},
+		{
+			name:           "html format with invalid address (connection failed)",
+			queryParam:     "relay-agent",
+			format:         "html",
+			mockServices:   map[string][]string{"relay-agent": {"http://127.0.0.1:99999"}},
+			expectedStatus: http.StatusExpectationFailed,
+			expectedError:  "no profiles available for service [relay-agent]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Reset mock expectations
+			testObj.ExpectedCalls = nil
+			testObj.Calls = nil
+
+			// Only set up GetAll expectation if we expect it to be called
+			if tt.queryParam != "" {
+				testObj.On("GetAll").Return(tt.mockServices)
+			}
+
+			w := httptest.NewRecorder()
+			url := "/v1/cover/profile/"
+			if tt.queryParam != "" {
+				url += "?name=" + tt.queryParam
+				if tt.format != "" {
+					url += "&format=" + tt.format
+				}
+			} else if tt.format != "" {
+				url += "?format=" + tt.format
+			}
+			req, _ := http.NewRequest("GET", url, nil)
+			router.ServeHTTP(w, req)
+
+			assert.Equal(t, tt.expectedStatus, w.Code)
+			if tt.expectedError != "" {
+				assert.Contains(t, w.Body.String(), tt.expectedError)
+			}
+
+			testObj.AssertExpectations(t)
+		})
+	}
+}
